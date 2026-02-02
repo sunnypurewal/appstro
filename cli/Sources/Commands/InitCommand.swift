@@ -18,10 +18,22 @@ struct Init: ParsableCommand {
         let projectPath = currentPath + name
         let sourcesPath = projectPath + "Sources"
 
+        print("📝 Enter a brief description/pitch for '\(name)':")
+        let description = readLine() ?? ""
+
         print("🚀 Creating project '\(name)' at \(projectPath)...")
 
         // 1. Create directories
         try sourcesPath.mkpath()
+
+        // 2. Create appstro.json (Project Root Indicator & Context)
+        let config = [
+            "name": name,
+            "description": description,
+            "app_path": name
+        ]
+        let configData = try JSONSerialization.data(withJSONObject: config, options: .prettyPrinted)
+        try (projectPath + "appstro.json").write(configData)
 
         // 2. Create basic SwiftUI files
         let appSwift = """

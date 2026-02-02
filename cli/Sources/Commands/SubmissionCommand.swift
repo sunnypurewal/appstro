@@ -5,6 +5,6 @@ struct Submission: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "submission",
         abstract: "Manage App Store submissions.",
-        subcommands: [Screenshots.self]
+        subcommands: [Screenshots.self, Metadata.self]
     )
 }

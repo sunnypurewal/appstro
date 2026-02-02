@@ -1,5 +1,5 @@
 {
-  "originHash" : "39320e4c31609cc7366ac152cd4d20bfeaf50cecb7b907f8cf4a5be5edc19b06",
+  "originHash" : "03992cf152da7e026b6777387d1ebcd5b18e013ad39846b36ed8c5a893b93e61",
   "pins" : [
     {
       "identity" : "aexml",
@@ -53,6 +53,15 @@
       "state" : {
         "revision" : "26cc5e9ae0947092c7139ef7ba612e34646086c7",
         "version" : "0.10.1"
+      }
+    },
+    {
+      "identity" : "swift-ai-sdk",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/teunlao/swift-ai-sdk",
+      "state" : {
+        "revision" : "d169beae0dd2f259938de5434e81e563e98c83dd",
+        "version" : "0.8.3"
       }
     },
     {

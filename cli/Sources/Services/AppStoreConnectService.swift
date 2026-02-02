@@ -28,6 +28,13 @@ struct DraftVersion: Sendable {
     let id: String
 }
 
+struct ContactInfo: Sendable {
+    var firstName: String?
+    var lastName: String?
+    var email: String?
+    var phone: String?
+}
+
 final class AppStoreConnectService {
     private let provider: APIProvider
 
@@ -167,6 +174,141 @@ final class AppStoreConnectService {
             return DraftVersion(version: attributes.versionString ?? "1.0", id: draft.id)
         }
         return nil
+    }
+
+    func updateMetadata(versionId: String, metadata: GeneratedMetadata, urls: (support: String, marketing: String), copyright: String, contactInfo: ContactInfo) async throws {
+        // 1. Update Localization
+        let locEndpoint = APIEndpoint.v1.appStoreVersions.id(versionId).appStoreVersionLocalizations.get()
+        let locResponse = try await provider.request(locEndpoint)
+        guard let localization = locResponse.data.first else {
+            throw AppStoreConnectError.apiError("No localizations found for this version.")
+        }
+
+        let locAttributes = AppStoreVersionLocalizationUpdateRequest.Data.Attributes(
+            description: metadata.description,
+            keywords: metadata.keywords,
+            marketingURL: URL(string: urls.marketing),
+            promotionalText: metadata.promotionalText,
+            supportURL: URL(string: urls.support)
+        )
+        let locUpdate = AppStoreVersionLocalizationUpdateRequest(data: .init(type: .appStoreVersionLocalizations, id: localization.id, attributes: locAttributes))
+        _ = try await provider.request(APIEndpoint.v1.appStoreVersionLocalizations.id(localization.id).patch(locUpdate))
+
+        // 2. Update Version Attributes (Copyright & Release Type)
+        let versionAttributes = AppStoreVersionUpdateRequest.Data.Attributes(
+            copyright: copyright,
+            releaseType: .afterApproval
+        )
+        let versionUpdate = AppStoreVersionUpdateRequest(data: .init(type: .appStoreVersions, id: versionId, attributes: versionAttributes))
+        _ = try await provider.request(APIEndpoint.v1.appStoreVersions.id(versionId).patch(versionUpdate))
+
+        // 3. Update Review Details
+        var reviewParams = APIEndpoint.V1.AppStoreVersions.WithID.GetParameters()
+        reviewParams.include = [.appStoreReviewDetail]
+        let versionEndpoint = APIEndpoint.v1.appStoreVersions.id(versionId).get(parameters: reviewParams)
+        let versionResponse = try await provider.request(versionEndpoint)
+        
+        let existingReviewDetailId = versionResponse.included?.compactMap { item -> String? in
+            if case .appStoreReviewDetail(let detail) = item { return detail.id }
+            return nil
+        }.first
+
+        if let reviewId = existingReviewDetailId {
+            let reviewAttributes = AppStoreReviewDetailUpdateRequest.Data.Attributes(
+                contactFirstName: contactInfo.firstName,
+                contactLastName: contactInfo.lastName,
+                contactPhone: contactInfo.phone,
+                contactEmail: contactInfo.email,
+                isDemoAccountRequired: false,
+                notes: metadata.reviewNotes
+            )
+            let reviewUpdate = AppStoreReviewDetailUpdateRequest(data: .init(type: .appStoreReviewDetails, id: reviewId, attributes: reviewAttributes))
+            _ = try await provider.request(APIEndpoint.v1.appStoreReviewDetails.id(reviewId).patch(reviewUpdate))
+        } else {
+            let relData = AppStoreReviewDetailCreateRequest.Data.Relationships.AppStoreVersion.Data(type: .appStoreVersions, id: versionId)
+            let rel = AppStoreReviewDetailCreateRequest.Data.Relationships(appStoreVersion: .init(data: relData))
+            let createAttributes = AppStoreReviewDetailCreateRequest.Data.Attributes(
+                contactFirstName: contactInfo.firstName,
+                contactLastName: contactInfo.lastName,
+                contactPhone: contactInfo.phone,
+                contactEmail: contactInfo.email,
+                isDemoAccountRequired: false,
+                notes: metadata.reviewNotes
+            )
+            let createRequest = AppStoreReviewDetailCreateRequest(data: .init(type: .appStoreReviewDetails, attributes: createAttributes, relationships: rel))
+            _ = try await provider.request(APIEndpoint.v1.appStoreReviewDetails.post(createRequest))
+        }
+    }
+
+    func fetchExistingReviewDetail() async throws -> ContactInfo? {
+        let apps = try await listApps()
+        
+        for app in apps {
+            var params = APIEndpoint.V1.Apps.WithID.AppStoreVersions.GetParameters()
+            params.include = [.appStoreReviewDetail]
+            params.limit = 5
+            
+            let endpoint = APIEndpoint.v1.apps.id(app.id).appStoreVersions.get(parameters: params)
+            let response = try await provider.request(endpoint)
+            
+            let reviewDetail = response.included?.compactMap { item -> AppStoreReviewDetail? in
+                if case .appStoreReviewDetail(let detail) = item { return detail }
+                return nil
+            }.first { detail in
+                return detail.attributes?.contactPhone != nil && detail.attributes?.contactEmail != nil
+            }
+            
+            if let detail = reviewDetail, let attr = detail.attributes {
+                return ContactInfo(
+                    firstName: attr.contactFirstName,
+                    lastName: attr.contactLastName,
+                    email: attr.contactEmail,
+                    phone: attr.contactPhone
+                )
+            }
+        }
+        return nil
+    }
+
+    func fetchContactInfo() async throws -> ContactInfo {
+        // 1. Try to find existing info from other apps first
+        if let existing = try? await fetchExistingReviewDetail() {
+            return existing
+        }
+
+        // 2. Fallback to user profile
+        let usersEndpoint = APIEndpoint.v1.users.get(parameters: .init(limit: 1))
+        let userResponse = try await provider.request(usersEndpoint)
+        
+        if let user = userResponse.data.first?.attributes {
+            return ContactInfo(
+                firstName: user.firstName,
+                lastName: user.lastName,
+                email: user.username,
+                phone: nil
+            )
+        }
+        
+        return ContactInfo()
+    }
+
+    func getDeveloperEmailDomain() async throws -> String {
+        let info = try await fetchContactInfo()
+        if let email = info.email {
+            let parts = email.split(separator: "@")
+            if parts.count == 2 {
+                return String(parts[1])
+            }
+        }
+        return "example.com"
+    }
+
+    func getTeamName() async throws -> String {
+        let info = try await fetchContactInfo()
+        if let first = info.firstName, let last = info.lastName {
+            return "\(first) \(last)"
+        }
+        return "Developer"
     }
 
     func uploadScreenshots(versionId: String, processedDirectory: URL) async throws {
