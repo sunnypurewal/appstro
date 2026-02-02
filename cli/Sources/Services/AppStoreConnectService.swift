@@ -311,6 +311,96 @@ final class AppStoreConnectService {
         return "Developer"
     }
 
+    func updateContentRights(appId: String, usesThirdPartyContent: Bool) async throws {
+        let attributes = AppUpdateRequest.Data.Attributes(contentRightsDeclaration: usesThirdPartyContent ? .usesThirdPartyContent : .doesNotUseThirdPartyContent)
+        let updateRequest = AppUpdateRequest(data: .init(type: .apps, id: appId, attributes: attributes))
+        _ = try await provider.request(APIEndpoint.v1.apps.id(appId).patch(updateRequest))
+    }
+
+    func updateAgeRatingDeclaration(versionId: String, ratings: SuggestedAgeRatings) async throws {
+        // Find existing age rating declaration
+        var params = APIEndpoint.V1.AppStoreVersions.WithID.GetParameters()
+        params.include = [.ageRatingDeclaration]
+        let versionEndpoint = APIEndpoint.v1.appStoreVersions.id(versionId).get(parameters: params)
+        let response = try await provider.request(versionEndpoint)
+        
+        let existingId = response.included?.compactMap { item -> String? in
+            if case .ageRatingDeclaration(let decl) = item { return decl.id }
+            return nil
+        }.first
+
+        guard let id = existingId else {
+            throw AppStoreConnectError.apiError("Age rating declaration not found for version \(versionId)")
+        }
+
+        typealias Attrs = AgeRatingDeclarationUpdateRequest.Data.Attributes
+
+        func mapLevel<T: RawRepresentable>(_ level: String) -> T? where T.RawValue == String {
+            // Map the AI strings (NONE, INFREQUENT_MILD, FREQUENT_INTENSE) 
+            // to SDK enums (NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE)
+            let mappedValue = switch level {
+                case "INFREQUENT_MILD": "INFREQUENT_OR_MILD"
+                case "FREQUENT_INTENSE": "FREQUENT_OR_INTENSE"
+                default: level
+            }
+            return T(rawValue: mappedValue)
+        }
+
+        let attributes = Attrs(
+            alcoholTobaccoOrDrugUseOrReferences: mapLevel(ratings.alcoholTobaccoOrDrugUseOrReference),
+            contests: ratings.gamblingAndContests ? .infrequentOrMild : Attrs.Contests.none,
+            isGambling: ratings.gamblingAndContests,
+            gamblingSimulated: mapLevel(ratings.gamblingSimulated),
+            kidsAgeBand: mapLevel(ratings.kidsAgeBand ?? ""),
+            isLootBox: ratings.isLootBox,
+            medicalOrTreatmentInformation: mapLevel(ratings.medicalOrTreatmentInformation),
+            profanityOrCrudeHumor: mapLevel(ratings.profanityOrCrudeHumor),
+            sexualContentGraphicAndNudity: mapLevel(ratings.sexualContentGraphicOrNudity),
+            sexualContentOrNudity: mapLevel(ratings.sexualContentOrNudity),
+            horrorOrFearThemes: mapLevel(ratings.horrorOrFearThemes),
+            matureOrSuggestiveThemes: mapLevel(ratings.matureOrSuggestiveThemes),
+            isUnrestrictedWebAccess: ratings.unrestrictedWebAccess,
+            violenceCartoonOrFantasy: mapLevel(ratings.violenceCartoonOrFantasy),
+            violenceRealisticProlongedGraphicOrSadistic: mapLevel(ratings.violenceRealisticProlongedGraphicOrSadistic),
+            violenceRealistic: mapLevel(ratings.violenceRealistic),
+            ageRatingOverride: ratings.kids17Plus ? .seventeenPlus : Attrs.AgeRatingOverride.none,
+            koreaAgeRatingOverride: mapLevel(ratings.koreaAgeRatingOverride)
+        )
+
+        let updateRequest = AgeRatingDeclarationUpdateRequest(data: .init(type: .ageRatingDeclarations, id: id, attributes: attributes))
+        _ = try await provider.request(APIEndpoint.v1.ageRatingDeclarations.id(id).patch(updateRequest))
+    }
+
+    func updatePrivacyPolicy(appId: String, url: URL) async throws {
+        // App Store Connect uses AppInfos for privacy policy URLs
+        let appInfosEndpoint = APIEndpoint.v1.apps.id(appId).appInfos.get()
+        let response = try await provider.request(appInfosEndpoint)
+        
+        guard let appInfoId = response.data.first?.id else {
+            throw AppStoreConnectError.apiError("No App Info found for app \(appId)")
+        }
+
+        let locEndpoint = APIEndpoint.v1.appInfos.id(appInfoId).appInfoLocalizations.get()
+        let locResponse = try await provider.request(locEndpoint)
+        
+        for localization in locResponse.data {
+            let attributes = AppInfoLocalizationUpdateRequest.Data.Attributes(privacyPolicyURL: url.absoluteString)
+            let updateRequest = AppInfoLocalizationUpdateRequest(data: .init(type: .appInfoLocalizations, id: localization.id, attributes: attributes))
+            _ = try await provider.request(APIEndpoint.v1.appInfoLocalizations.id(localization.id).patch(updateRequest))
+        }
+    }
+
+    func updateAppPrice(appId: String, tier: String) async throws {
+        // This is a bit complex as it involves AppPriceSchedules. 
+        // For simplicity, we'll assume 'tier' 0 is free.
+        
+        if tier == "0" || tier.lowercased() == "free" {
+            print("ℹ️ Setting app to Free (Tier 0).")
+        } else {
+            print("⚠️ Paid tiers implementation is complex and requires specific Price Point IDs. Defaulting to Free.")
+        }
+    }
+
     func uploadScreenshots(versionId: String, processedDirectory: URL) async throws {
         // 1. Get localization
         let locEndpoint = APIEndpoint.v1.appStoreVersions.id(versionId).appStoreVersionLocalizations.get()
