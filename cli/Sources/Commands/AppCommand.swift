@@ -25,7 +25,7 @@ struct App: AsyncParsableCommand {
         }
         
         // 3. Fetch details
-        let service = AppStoreConnectService(issuerId: issuerId, keyId: keyId, privateKey: privateKey)
+        let service = try AppStoreConnectService(issuerId: issuerId, keyId: keyId, privateKey: privateKey)
         
         print("🔍 Searching for app: \(parameter)...")
         

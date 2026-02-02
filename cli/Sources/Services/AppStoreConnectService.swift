@@ -1,5 +1,7 @@
 import Foundation
+import AppStoreConnect_Swift_SDK
 import CryptoKit
+import ImageIO
 
 enum AppStoreConnectError: Error {
     case invalidResponse
@@ -8,89 +10,96 @@ enum AppStoreConnectError: Error {
     case invalidPrivateKey
 }
 
-struct AppDetails {
+struct AppDetails: Sendable {
     let name: String
     let bundleId: String
     let appStoreUrl: String
     let publishedVersion: String?
 }
 
-actor AppStoreConnectService {
-    private let issuerId: String
-    private let keyId: String
-    private let privateKey: String
+struct AppInfo: Sendable {
+    let id: String
+    let name: String
+    let bundleId: String
+}
 
-    init(issuerId: String, keyId: String, privateKey: String) {
-        self.issuerId = issuerId
-        self.keyId = keyId
-        self.privateKey = privateKey
+struct DraftVersion: Sendable {
+    let version: String
+    let id: String
+}
+
+final class AppStoreConnectService {
+    private let provider: APIProvider
+
+    init(issuerId: String, keyId: String, privateKey: String) throws {
+        let sanitizedKey = privateKey
+            .replacingOccurrences(of: "-----BEGIN PRIVATE KEY-----", with: "")
+            .replacingOccurrences(of: "-----END PRIVATE KEY-----", with: "")
+            .replacingOccurrences(of: "\n", with: "")
+            .replacingOccurrences(of: "\r", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            
+        let configuration = try APIConfiguration(issuerID: issuerId, privateKeyID: keyId, privateKey: sanitizedKey)
+        self.provider = APIProvider(configuration: configuration)
     }
 
     func fetchAppDetails(query: AppQuery) async throws -> AppDetails? {
-        let token = try generateJWT()
-        
-        var urlComponents = URLComponents(string: "https://api.appstoreconnect.apple.com/v1/apps")!
-        var queryItems = [
-            URLQueryItem(name: "include", value: "appStoreVersions"),
-            URLQueryItem(name: "limit[appStoreVersions]", value: "10"),
-            URLQueryItem(name: "limit", value: "200")
-        ]
+        var parameters = APIEndpoint.V1.Apps.GetParameters()
+        parameters.include = [.appStoreVersions]
+        parameters.limitAppStoreVersions = 10
+        parameters.limit = 200
         
         switch query.type {
         case .name:
             break
         case .bundleId(let bundleId):
-            queryItems.append(URLQueryItem(name: "filter[bundleId]", value: bundleId))
+            parameters.filterBundleID = [bundleId]
         }
         
-        urlComponents.queryItems = queryItems
+        let endpoint = APIEndpoint.v1.apps.get(parameters: parameters)
+        let response = try await provider.request(endpoint)
         
-        let apiResponse: AppResponse = try await performRequest(url: urlComponents.url!, token: token)
-        
-        let appData: AppData?
+        let appData: AppStoreConnect_Swift_SDK.App?
         switch query.type {
         case .name(let name):
-            appData = apiResponse.data.first { $0.attributes.name.localizedCaseInsensitiveCompare(name) == .orderedSame }
+            appData = response.data.first { $0.attributes?.name?.localizedCaseInsensitiveCompare(name) == .orderedSame }
         case .bundleId:
-            appData = apiResponse.data.first
+            appData = response.data.first
         }
         
-        guard let app = appData else {
+        guard let app = appData, let attributes = app.attributes else {
             return nil
         }
         
-        let publishedVersion = findPublishedVersion(appData: app, included: apiResponse.included ?? [])
+        let publishedVersion = findPublishedVersion(app: app, included: response.included ?? [])
         
         return AppDetails(
-            name: app.attributes.name,
-            bundleId: app.attributes.bundleId,
+            name: attributes.name ?? "Unknown",
+            bundleId: attributes.bundleID ?? "Unknown",
             appStoreUrl: "https://apps.apple.com/app/id\(app.id)",
             publishedVersion: publishedVersion
         )
     }
 
     func deduceBundleIdPrefix(preferredPrefix: String?) async throws -> String? {
-        // 0. Prioritize manually entered prefix from preferences
         if let preferredPrefix = preferredPrefix {
             return preferredPrefix
         }
 
-        let token = try generateJWT()
-        
         // 1. Try historical Bundle IDs
-        let bundleIdsUrl = URL(string: "https://api.appstoreconnect.apple.com/v1/bundleIds?limit=200")!
-        let bundleResponse: BundleIdResponse = try await performRequest(url: bundleIdsUrl, token: token)
+        let bundleIdsEndpoint = APIEndpoint.v1.bundleIDs.get(parameters: .init(limit: 200))
+        let bundleResponse = try await provider.request(bundleIdsEndpoint)
         
-        let identifiers = bundleResponse.data.map { $0.attributes.identifier }
+        let identifiers = bundleResponse.data.compactMap { $0.attributes?.identifier }
         if let prefix = findMostFrequentPrefix(identifiers: identifiers) {
             return prefix
         }
         
         // 2. Try email domain fallback
-        let usersUrl = URL(string: "https://api.appstoreconnect.apple.com/v1/users?limit=10")!
-        let userResponse: UserResponse = try await performRequest(url: usersUrl, token: token)
+        let usersEndpoint = APIEndpoint.v1.users.get(parameters: .init(limit: 10))
+        let userResponse = try await provider.request(usersEndpoint)
         
-        if let email = userResponse.data.first?.attributes.username {
+        if let email = userResponse.data.first?.attributes?.username {
             let parts = email.split(separator: "@")
             if parts.count == 2 {
                 let domain = String(parts[1])
@@ -106,36 +115,259 @@ actor AppStoreConnectService {
     }
 
     func registerBundleId(name: String, identifier: String) async throws -> String {
-        let token = try generateJWT()
-        
         // 1. Check if identifier already exists
-        let filterUrl = URL(string: "https://api.appstoreconnect.apple.com/v1/bundleIds?filter[identifier]=\(identifier)")!
-        let existingBundleResponse: BundleIdResponse = try await performRequest(url: filterUrl, token: token)
+        let filterEndpoint = APIEndpoint.v1.bundleIDs.get(parameters: .init(filterIdentifier: [identifier]))
+        let existingBundleResponse = try await provider.request(filterEndpoint)
         
         if let existing = existingBundleResponse.data.first {
             return existing.id
         }
         
         // 2. Register if it doesn't exist
-        let registerBody = BundleIdCreateRequest(
-            data: BundleIdCreateRequest.Data(
-                attributes: BundleIdCreateRequest.Data.Attributes(
-                    identifier: identifier,
-                    name: name,
-                    platform: "IOS"
-                )
-            )
-        )
-        let registerUrl = URL(string: "https://api.appstoreconnect.apple.com/v1/bundleIds")!
-        let newBundle: BundleIdData = try await performPostRequest(url: registerUrl, token: token, body: registerBody)
-        return newBundle.id
+        let attributes = BundleIDCreateRequest.Data.Attributes(name: name, platform: .ios, identifier: identifier)
+        let data = BundleIDCreateRequest.Data(type: .bundleIDs, attributes: attributes)
+        let registerRequest = BundleIDCreateRequest(data: data)
+        let endpoint = APIEndpoint.v1.bundleIDs.post(registerRequest)
+        let newBundle = try await provider.request(endpoint)
+        return newBundle.data.id
     }
 
-    func listApps() async throws -> [AppData] {
-        let token = try generateJWT()
-        let url = URL(string: "https://api.appstoreconnect.apple.com/v1/apps?limit=100")!
-        let response: AppResponse = try await performRequest(url: url, token: token)
-        return response.data
+    func listApps() async throws -> [AppInfo] {
+        let endpoint = APIEndpoint.v1.apps.get(parameters: .init(limit: 100))
+        let response = try await provider.request(endpoint)
+        return response.data.map { app in
+            AppInfo(
+                id: app.id,
+                name: app.attributes?.name ?? "Unknown",
+                bundleId: app.attributes?.bundleID ?? "Unknown"
+            )
+        }
+    }
+
+    func findLatestDraftVersion() async throws -> (app: AppInfo, version: String, id: String)? {
+        let apps = try await listApps()
+        
+        for app in apps {
+            if let draft = try await findDraftVersion(for: app.id) {
+                return (app, draft.version, draft.id)
+            }
+        }
+        
+        return nil
+    }
+
+    func findDraftVersion(for appId: String) async throws -> DraftVersion? {
+        var parameters = APIEndpoint.V1.Apps.WithID.AppStoreVersions.GetParameters()
+        parameters.filterAppStoreState = [.prepareForSubmission]
+        parameters.limit = 1
+        let endpoint = APIEndpoint.v1.apps.id(appId).appStoreVersions.get(parameters: parameters)
+        let response = try await provider.request(endpoint)
+        
+        if let draft = response.data.first, let attributes = draft.attributes {
+            return DraftVersion(version: attributes.versionString ?? "1.0", id: draft.id)
+        }
+        return nil
+    }
+
+    func uploadScreenshots(versionId: String, processedDirectory: URL) async throws {
+        // 1. Get localization
+        let locEndpoint = APIEndpoint.v1.appStoreVersions.id(versionId).appStoreVersionLocalizations.get()
+        let locResponse = try await provider.request(locEndpoint)
+        guard let localization = locResponse.data.first else {
+            throw AppStoreConnectError.apiError("No localizations found for this version.")
+        }
+        print("📍 Using localization: \(localization.attributes?.locale ?? "unknown") (ID: \(localization.id))")
+        
+        let bezelService = BezelService()
+        let deviceTypes = ["iphone", "ipad"]
+        
+        struct DeviceWork {
+            let deviceType: String
+            let bezelInfo: DeviceBezelInfo
+            let imageFiles: [URL]
+            let displayType: ScreenshotDisplayType
+            var setId: String?
+        }
+        
+        var works: [DeviceWork] = []
+        
+        // 1. Prepare and Find/Create Sets
+        print("🔍 Checking available screenshot sets...")
+        let allSetsEndpoint = APIEndpoint.v1.appStoreVersionLocalizations.id(localization.id).appScreenshotSets.get()
+        let allSetsResponse = try await provider.request(allSetsEndpoint)
+        for set in allSetsResponse.data {
+            print("  - Found Set: \(set.attributes?.screenshotDisplayType?.rawValue ?? "unknown") (ID: \(set.id))")
+        }
+
+        for deviceType in deviceTypes {
+            let deviceDir = processedDirectory.appendingPathComponent(deviceType)
+            
+            // Only proceed if the folder exists
+            guard FileManager.default.fileExists(atPath: deviceDir.path) else {
+                continue
+            }
+            
+            guard let bezelInfo = bezelService.bezelInfo(for: deviceType) else { continue }
+            
+            let files = (try? FileManager.default.contentsOfDirectory(at: deviceDir, includingPropertiesForKeys: nil)) ?? []
+            let imageFiles = files.filter { ["png", "jpg", "jpeg"].contains($0.pathExtension.lowercased()) }
+            
+            // If the folder exists but is empty, don't touch App Store Connect for this device
+            if imageFiles.isEmpty {
+                print("  ⏭️ Skipping \(deviceType) (no images found in \(deviceType)/ directory)")
+                continue
+            }
+            
+            let sdkDisplayType: ScreenshotDisplayType? = switch bezelInfo.displayType {
+                case "IPHONE_67": .appIphone67
+                case "IPAD_PRO_3GEN_129": .appIpadPro3gen129
+                default: nil
+            }
+            
+            guard let displayType = sdkDisplayType else { continue }
+            
+            works.append(DeviceWork(deviceType: deviceType, bezelInfo: bezelInfo, imageFiles: imageFiles.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }), displayType: displayType))
+        }
+
+        // 2. Perform all deletions first (only for works we identified)
+        if !works.isEmpty {
+            print("🚀 Cleaning up existing screenshots...")
+        }
+        for i in 0..<works.count {
+            let work = works[i]
+            
+            var setParams = APIEndpoint.V1.AppStoreVersionLocalizations.WithID.AppScreenshotSets.GetParameters()
+            let filterType: APIEndpoint.V1.AppStoreVersionLocalizations.WithID.AppScreenshotSets.GetParameters.FilterScreenshotDisplayType = switch work.displayType {
+                case .appIphone67: .appIphone67
+                case .appIpadPro3gen129: .appIpadPro3gen129
+                default: fatalError("Unsupported display type")
+            }
+            setParams.filterScreenshotDisplayType = [filterType]
+            
+            let setEndpoint = APIEndpoint.v1.appStoreVersionLocalizations.id(localization.id).appScreenshotSets.get(parameters: setParams)
+            let setResponse = try await provider.request(setEndpoint)
+            
+            // Find the set that MATCHES our required display type exactly
+            let existingSet = setResponse.data.first { $0.attributes?.screenshotDisplayType == work.displayType }
+            
+            let setId: String
+            if let existing = existingSet {
+                setId = existing.id
+                print("  🗑️ Clearing \(work.bezelInfo.displayType) set...")
+                let screenshotsEndpoint = APIEndpoint.v1.appScreenshotSets.id(setId).appScreenshots.get()
+                let existingScreenshots = try await provider.request(screenshotsEndpoint)
+                
+                for screenshot in existingScreenshots.data {
+                    let deleteEndpoint = APIEndpoint.v1.appScreenshots.id(screenshot.id).delete
+                    try await provider.request(deleteEndpoint)
+                }
+            } else {
+                let attributes = AppScreenshotSetCreateRequest.Data.Attributes(screenshotDisplayType: work.displayType)
+                let relData = AppScreenshotSetCreateRequest.Data.Relationships.AppStoreVersionLocalization.Data(type: .appStoreVersionLocalizations, id: localization.id)
+                let rel = AppScreenshotSetCreateRequest.Data.Relationships(appStoreVersionLocalization: .init(data: relData))
+                let createRequest = AppScreenshotSetCreateRequest(data: .init(type: .appScreenshotSets, attributes: attributes, relationships: rel))
+                let createEndpoint = APIEndpoint.v1.appScreenshotSets.post(createRequest)
+                let newSet = try await provider.request(createEndpoint)
+                setId = newSet.data.id
+            }
+            works[i].setId = setId
+        }
+        
+        // Give backend a moment to settle
+        try? await Task.sleep(nanoseconds: 3 * 1_000_000_000)
+
+        // 3. Perform all uploads
+        for work in works {
+            guard let setId = work.setId else { continue }
+            print("🚀 Uploading \(work.deviceType) screenshots (Preview Type: \(work.displayType.rawValue))...")
+            for file in work.imageFiles {
+                try await uploadSingleScreenshot(file: file, setId: setId)
+            }
+        }
+    }
+
+    private func uploadSingleScreenshot(file: URL, setId: String) async throws {
+        let fileName = file.lastPathComponent
+        
+        // Print dimensions for debugging
+        if let imageSource = CGImageSourceCreateWithURL(file as CFURL, nil),
+           let imageProperties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
+           let width = imageProperties[kCGImagePropertyPixelWidth] as? Int,
+           let height = imageProperties[kCGImagePropertyPixelHeight] as? Int {
+            print("    🔼 Uploading \(fileName) (\(width)x\(height))...")
+        } else {
+            print("    🔼 Uploading \(fileName)...")
+        }
+        
+        let fileData = try Data(contentsOf: file)
+        let fileSize = fileData.count
+        
+        // A. Reserve
+        let attributes = AppScreenshotCreateRequest.Data.Attributes(fileSize: fileSize, fileName: fileName)
+        let relData = AppScreenshotCreateRequest.Data.Relationships.AppScreenshotSet.Data(type: .appScreenshotSets, id: setId)
+        let rel = AppScreenshotCreateRequest.Data.Relationships(appScreenshotSet: .init(data: relData))
+        let reserveRequest = AppScreenshotCreateRequest(data: .init(type: .appScreenshots, attributes: attributes, relationships: rel))
+        let reserveEndpoint = APIEndpoint.v1.appScreenshots.post(reserveRequest)
+        let reservation = try await provider.request(reserveEndpoint)
+        
+        // B. Upload Bits
+        guard let operations = reservation.data.attributes?.uploadOperations else {
+            throw AppStoreConnectError.apiError("Missing upload operations for \(fileName)")
+        }
+        
+        for op in operations {
+            guard let urlStr = op.url, let url = URL(string: urlStr) else { continue }
+            var request = URLRequest(url: url)
+            request.httpMethod = op.method ?? "PUT"
+            op.requestHeaders?.forEach { request.setValue($0.value, forHTTPHeaderField: $0.name ?? "") }
+            
+            let start = op.offset ?? 0
+            let length = op.length ?? 0
+            let end = start + length
+            let chunk = fileData.subdata(in: start..<end)
+            
+            let (_, response) = try await URLSession.shared.upload(for: request, from: chunk)
+            guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+                throw AppStoreConnectError.apiError("Binary upload failed for \(fileName)")
+            }
+        }
+        
+        // C. Commit
+        let checksum = Insecure.MD5.hash(data: fileData).map { String(format: "%02hhx", $0) }.joined()
+        let updateAttributes = AppScreenshotUpdateRequest.Data.Attributes(sourceFileChecksum: checksum, isUploaded: true)
+        let updateRequest = AppScreenshotUpdateRequest(data: .init(type: .appScreenshots, id: reservation.data.id, attributes: updateAttributes))
+        let updateEndpoint = APIEndpoint.v1.appScreenshots.id(reservation.data.id).patch(updateRequest)
+        _ = try await provider.request(updateEndpoint)
+
+        // D. Poll for completion
+        var isProcessed = false
+        var attempts = 0
+        let maxAttempts = 30 // 60 seconds total
+        
+        while !isProcessed && attempts < maxAttempts {
+            attempts += 1
+            try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
+            
+            let pollEndpoint = APIEndpoint.v1.appScreenshots.id(reservation.data.id).get()
+            let status = try await provider.request(pollEndpoint)
+            
+            if let state = status.data.attributes?.assetDeliveryState {
+                switch state.state {
+                case .complete:
+                    isProcessed = true
+                case .failed:
+                    let details = state.errors?.map { "[\($0.code ?? "no-code")] \($0.description ?? "no-description")" }.joined(separator: "; ") ?? "Unknown Apple processing error"
+                    throw AppStoreConnectError.apiError("Processing failed for \(fileName): \(details)")
+                default:
+                    // Still processing
+                    break
+                }
+            }
+        }
+        
+        if !isProcessed {
+            throw AppStoreConnectError.apiError("Timeout waiting for \(fileName) to process at Apple.")
+        }
     }
 
     private func findMostFrequentPrefix(identifiers: [String]) -> String? {
@@ -150,245 +382,22 @@ actor AppStoreConnectService {
         return counts.max(by: { $0.value < $1.value })?.key
     }
 
-    private func performRequest<T: Codable>(url: URL, token: String) async throws -> T {
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try await validateResponse(data: data, response: response)
-        
-        return try JSONDecoder().decode(T.self, from: data)
-    }
-
-    private func performPostRequest<T: Codable, B: Codable>(url: URL, token: String, body: B) async throws -> T {
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(body)
-        
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try await validateResponse(data: data, response: response)
-        
-        let wrapper = try JSONDecoder().decode(DataWrapper<T>.self, from: data)
-        return wrapper.data
-    }
-
-    private func validateResponse(data: Data, response: URLResponse) async throws {
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw AppStoreConnectError.invalidResponse
-        }
-        
-        if httpResponse.statusCode == 409 {
-            let errorResponse = try? JSONDecoder().decode(APIErrorResponse.self, from: data)
-            let msg = errorResponse?.errors.first?.detail ?? "Conflict"
-            if msg.contains("name") {
-                throw AppStoreConnectError.apiError("The app name is already in use by another developer on the App Store. App names must be unique globally.")
-            } else if msg.contains("identifier") {
-                throw AppStoreConnectError.apiError("The bundle ID is already registered in your developer account.")
-            }
-            throw AppStoreConnectError.apiError(msg)
-        }
-        
-        if httpResponse.statusCode == 403 {
-            throw AppStoreConnectError.apiError("Your API key lacks the 'Admin' or 'App Manager' role required to create apps. Also, please ensure you have accepted all pending legal agreements in the 'Agreements, Tax, and Banking' section of App Store Connect.")
-        }
-        
-        if httpResponse.statusCode >= 400 {
-            let errorMsg = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw AppStoreConnectError.apiError("HTTP \(httpResponse.statusCode): \(errorMsg)")
-        }
-    }
-
-    private func findPublishedVersion(appData: AppData, included: [Included]) -> String? {
-        guard let versionIds = appData.relationships?.appStoreVersions?.data?.map({ $0.id }) else {
+    private func findPublishedVersion(app: AppStoreConnect_Swift_SDK.App, included: [AppStoreConnect_Swift_SDK.AppsResponse.IncludedItem]) -> String? {
+        guard let versionIds = app.relationships?.appStoreVersions?.data?.map({ $0.id }) else {
             return nil
         }
         
         for versionId in versionIds {
-            if let version = included.first(where: { $0.type == "appStoreVersions" && $0.id == versionId }),
-               let attributes = version.attributes,
-               attributes.appStoreState == "READY_FOR_SALE" {
-                return attributes.versionString
+            if let version = included.first(where: { 
+                if case .appStoreVersion(let v) = $0 { return v.id == versionId }
+                return false
+            }) {
+                if case .appStoreVersion(let v) = version, v.attributes?.appStoreState == .readyForSale {
+                    return v.attributes?.versionString
+                }
             }
         }
         
         return nil
     }
-
-    private func generateJWT() throws -> String {
-        let header = ["alg": "ES256", "kid": keyId, "typ": "JWT"]
-        let headerBase64 = try jsonToBase64Url(header)
-        
-        let now = Int(Date().timeIntervalSince1970)
-        let payload: [String: Any] = [
-            "iss": issuerId,
-            "exp": now + 1200, 
-            "aud": "appstoreconnect-v1"
-        ]
-        let payloadBase64 = try jsonToBase64Url(payload)
-        
-        let message = "\(headerBase64).\(payloadBase64)"
-        let signature = try sign(message: message)
-        
-        return "\(message).\(signature)"
-    }
-
-    private func jsonToBase64Url(_ dict: [String: Any]) throws -> String {
-        let data = try JSONSerialization.data(withJSONObject: dict)
-        return data.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-    }
-
-    private func sign(message: String) throws -> String {
-        let key: P256.Signing.PrivateKey
-        do {
-            key = try P256.Signing.PrivateKey(pemRepresentation: privateKey)
-        } catch {
-            throw AppStoreConnectError.invalidPrivateKey
-        }
-        
-        let signature = try key.signature(for: Data(message.utf8))
-        return signature.rawRepresentation.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-    }
 }
-
-// Additional Models
-struct BundleIdResponse: Codable {
-    let data: [BundleIdData]
-}
-
-struct BundleIdData: Codable {
-    let id: String
-    let attributes: BundleIdAttributes
-}
-
-struct BundleIdAttributes: Codable {
-    let identifier: String
-    let name: String
-}
-
-struct UserResponse: Codable {
-    let data: [UserData]
-}
-
-struct UserData: Codable {
-    let attributes: UserAttributes
-}
-
-struct UserAttributes: Codable {
-    let username: String
-    let roles: [String]
-}
-
-struct BundleIdCreateRequest: Codable {
-    struct Data: Codable {
-        struct Attributes: Codable {
-            let identifier: String
-            let name: String
-            let platform: String
-        }
-        let attributes: Attributes
-        let type: String
-        
-        init(attributes: Attributes) {
-            self.attributes = attributes
-            self.type = "bundleIds"
-        }
-    }
-    let data: Data
-}
-
-struct AppCreateRequest: Codable {
-    struct Data: Codable {
-        struct Attributes: Codable {
-            let name: String
-            let primaryLocale: String
-            let sku: String
-        }
-        struct Relationships: Codable {
-            struct BundleId: Codable {
-                struct Data: Codable {
-                    let id: String
-                    let type: String
-                    
-                    init(id: String) {
-                        self.id = id
-                        self.type = "bundleIds"
-                    }
-                }
-                let data: Data
-            }
-            let bundleId: BundleId
-        }
-        let attributes: Attributes
-        let relationships: Relationships
-        let type: String
-        
-        init(attributes: Attributes, relationships: Relationships) {
-            self.attributes = attributes
-            self.relationships = relationships
-            self.type = "apps"
-        }
-    }
-    let data: Data
-}
-
-struct APIErrorResponse: Codable {
-    struct Error: Codable {
-        let detail: String
-    }
-    let errors: [Error]
-}
-
-struct DataWrapper<T: Codable>: Codable {
-    let data: T
-}
-
-// API Models
-struct AppResponse: Codable {
-    let data: [AppData]
-    let included: [Included]?
-}
-
-struct AppData: Codable {
-    let id: String
-    let attributes: AppAttributes
-    let relationships: AppRelationships?
-}
-
-struct AppAttributes: Codable {
-    let name: String
-    let bundleId: String
-}
-
-struct AppRelationships: Codable {
-    let appStoreVersions: AppStoreVersions?
-}
-
-struct AppStoreVersions: Codable {
-    let data: [AppStoreVersionData]?
-}
-
-struct AppStoreVersionData: Codable {
-    let id: String
-    let type: String
-}
-
-struct Included: Codable {
-    let type: String
-    let id: String
-    let attributes: IncludedAttributes?
-}
-
-struct IncludedAttributes: Codable {
-    let versionString: String?
-    let appStoreState: String?
-}
-

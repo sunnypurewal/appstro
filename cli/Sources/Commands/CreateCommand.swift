@@ -20,7 +20,7 @@ struct Create: AsyncParsableCommand {
             return
         }
 
-        let service = AppStoreConnectService(issuerId: issuerId, keyId: keyId, privateKey: privateKey)
+        let service = try AppStoreConnectService(issuerId: issuerId, keyId: keyId, privateKey: privateKey)
         let prefService = PreferenceService()
         let prefs = prefService.loadPreferences()
 
@@ -100,13 +100,13 @@ struct Create: AsyncParsableCommand {
         print("-----------------------------------------------------------")
         print("\n(I'll be right here...)")
 
-        var detectedApp: AppData? = nil
+        var detectedApp: AppInfo? = nil
         while detectedApp == nil {
             try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5 seconds
             if let apps = try? await service.listApps() {
                 detectedApp = apps.first { app in
-                    app.attributes.bundleId == finalBundleId || 
-                    app.attributes.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+                    app.bundleId == finalBundleId || 
+                    app.name.localizedCaseInsensitiveCompare(name) == .orderedSame
                 }
             }
         }
