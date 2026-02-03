@@ -67,10 +67,10 @@ struct AgeRatings: AsyncParsableCommand {
         var suggestions: SuggestedAgeRatings?
         if let aiSuggestions = try? await aiService.suggestAgeRatings(appName: contextName ?? draft.app.name, description: contextPitch ?? "", codeContext: codeContext) {
             suggestions = aiSuggestions
-            print("🤖 AI has suggested age ratings based on your app.")
+            print("🤖 Suggested age ratings based on your app.")
             print("Reasoning: \(aiSuggestions.reasoning)")
         } else {
-            print("ℹ️ No AI analysis available. Using 'None' as default for all categories.")
+            print("ℹ️ No analysis available. Using 'None' as default for all categories.")
         }
 
         let finalRatings = SuggestedAgeRatings(
@@ -85,23 +85,37 @@ struct AgeRatings: AsyncParsableCommand {
             sexualContentGraphicOrNudity: suggestions?.sexualContentGraphicOrNudity ?? "NONE",
             violenceCartoonOrFantasy: suggestions?.violenceCartoonOrFantasy ?? "NONE",
             violenceRealistic: suggestions?.violenceRealistic ?? "NONE",
-                        violenceRealisticProlongedGraphicOrSadistic: suggestions?.violenceRealisticProlongedGraphicOrSadistic ?? "NONE",
-                                    unrestrictedWebAccess: suggestions?.unrestrictedWebAccess ?? false,
-                                    kids17Plus: suggestions?.kids17Plus ?? false,
-                                    isLootBox: suggestions?.isLootBox ?? false,
-                                    kidsAgeBand: suggestions?.kidsAgeBand,
-                                    koreaAgeRatingOverride: suggestions?.koreaAgeRatingOverride ?? "NONE",
-                                    reasoning: ""
-                                )
-                        
-                                print("\n--- PROPOSED AGE RATINGS ---")
-                                print("Violence (Cartoon):       \(finalRatings.violenceCartoonOrFantasy)")
-                                print("Violence (Realistic):     \(finalRatings.violenceRealistic)")
-                                print("Profanity/Crude Humor:    \(finalRatings.profanityOrCrudeHumor)")
-                                print("Mature/Suggestive:        \(finalRatings.matureOrSuggestiveThemes)")
-                                print("Gambling (Simulated):     \(finalRatings.gamblingSimulated)")
-                                print("Unrestricted Web:         \(finalRatings.unrestrictedWebAccess ? "YES" : "NO")")
-                                print("Purchasable Loot Boxes:   \(finalRatings.isLootBox ? "YES" : "NO")")
+            violenceRealisticProlongedGraphicOrSadistic: suggestions?.violenceRealisticProlongedGraphicOrSadistic ?? "NONE",
+            gunsOrOtherWeapons: suggestions?.gunsOrOtherWeapons ?? "NONE",
+            parentalControls: suggestions?.parentalControls ?? false,
+            userGeneratedContent: suggestions?.userGeneratedContent ?? false,
+            ageAssurance: suggestions?.ageAssurance ?? false,
+            advertising: suggestions?.advertising ?? false,
+            healthOrWellnessTopics: suggestions?.healthOrWellnessTopics ?? false,
+            messagingAndChat: suggestions?.messagingAndChat ?? "NONE",
+            unrestrictedWebAccess: suggestions?.unrestrictedWebAccess ?? false,
+            kids17Plus: suggestions?.kids17Plus ?? false,
+            isLootBox: suggestions?.isLootBox ?? false,
+            kidsAgeBand: suggestions?.kidsAgeBand,
+            koreaAgeRatingOverride: suggestions?.koreaAgeRatingOverride ?? "NONE",
+            reasoning: ""
+        )
+                
+        print("\n--- PROPOSED AGE RATINGS ---")
+        print("Violence (Cartoon):       \(finalRatings.violenceCartoonOrFantasy)")
+        print("Violence (Realistic):     \(finalRatings.violenceRealistic)")
+        print("Guns/Other Weapons:       \(finalRatings.gunsOrOtherWeapons)")
+        print("Profanity/Crude Humor:    \(finalRatings.profanityOrCrudeHumor)")
+        print("Mature/Suggestive:        \(finalRatings.matureOrSuggestiveThemes)")
+        print("Gambling (Simulated):     \(finalRatings.gamblingSimulated)")
+        print("Messaging & Chat:         \(finalRatings.messagingAndChat)")
+        print("User Generated Content:   \(finalRatings.userGeneratedContent ? "YES" : "NO")")
+        print("Advertising:              \(finalRatings.advertising ? "YES" : "NO")")
+        print("Health/Wellness Topics:   \(finalRatings.healthOrWellnessTopics ? "YES" : "NO")")
+        print("Parental Controls:        \(finalRatings.parentalControls ? "YES" : "NO")")
+        print("Age Assurance:            \(finalRatings.ageAssurance ? "YES" : "NO")")
+        print("Unrestricted Web:         \(finalRatings.unrestrictedWebAccess ? "YES" : "NO")")
+        print("Purchasable Loot Boxes:   \(finalRatings.isLootBox ? "YES" : "NO")")
                                 if let band = finalRatings.kidsAgeBand {
                                     print("Kids Age Band:            \(band)")
                                 }

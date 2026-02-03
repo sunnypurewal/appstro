@@ -347,24 +347,29 @@ final class AppStoreConnectService {
         }
 
         let attributes = Attrs(
+            isAdvertising: ratings.advertising,
             alcoholTobaccoOrDrugUseOrReferences: mapLevel(ratings.alcoholTobaccoOrDrugUseOrReference),
             contests: ratings.gamblingAndContests ? .infrequentOrMild : Attrs.Contests.none,
             isGambling: ratings.gamblingAndContests,
             gamblingSimulated: mapLevel(ratings.gamblingSimulated),
+            gunsOrOtherWeapons: mapLevel(ratings.gunsOrOtherWeapons),
+            isHealthOrWellnessTopics: ratings.healthOrWellnessTopics,
             kidsAgeBand: mapLevel(ratings.kidsAgeBand ?? ""),
             isLootBox: ratings.isLootBox,
             medicalOrTreatmentInformation: mapLevel(ratings.medicalOrTreatmentInformation),
+            isMessagingAndChat: ratings.messagingAndChat != "NONE",
+            isParentalControls: ratings.parentalControls,
             profanityOrCrudeHumor: mapLevel(ratings.profanityOrCrudeHumor),
+            isAgeAssurance: ratings.ageAssurance,
             sexualContentGraphicAndNudity: mapLevel(ratings.sexualContentGraphicOrNudity),
             sexualContentOrNudity: mapLevel(ratings.sexualContentOrNudity),
             horrorOrFearThemes: mapLevel(ratings.horrorOrFearThemes),
             matureOrSuggestiveThemes: mapLevel(ratings.matureOrSuggestiveThemes),
             isUnrestrictedWebAccess: ratings.unrestrictedWebAccess,
+            isUserGeneratedContent: ratings.userGeneratedContent,
             violenceCartoonOrFantasy: mapLevel(ratings.violenceCartoonOrFantasy),
             violenceRealisticProlongedGraphicOrSadistic: mapLevel(ratings.violenceRealisticProlongedGraphicOrSadistic),
             violenceRealistic: mapLevel(ratings.violenceRealistic),
-            ageRatingOverride: ratings.kids17Plus ? .seventeenPlus : Attrs.AgeRatingOverride.none,
-            koreaAgeRatingOverride: mapLevel(ratings.koreaAgeRatingOverride)
         )
 
         let updateRequest = AgeRatingDeclarationUpdateRequest(data: .init(type: .ageRatingDeclarations, id: id, attributes: attributes))
@@ -390,15 +395,126 @@ final class AppStoreConnectService {
         }
     }
 
-    func updateAppPrice(appId: String, tier: String) async throws {
-        // This is a bit complex as it involves AppPriceSchedules. 
-        // For simplicity, we'll assume 'tier' 0 is free.
+    func fetchCurrentPriceDescription(appId: String) async throws -> String? {
+        var parameters = APIEndpoint.V1.Apps.WithID.AppPriceSchedule.GetParameters()
+		parameters.include = [.baseTerritory, .manualPrices]
+		parameters.fieldsAppPriceSchedules = [.baseTerritory, .manualPrices]
+		parameters.fieldsAppPrices = [.appPricePoint, .territory]
+        let endpoint = APIEndpoint.v1.apps.id(appId).appPriceSchedule.get(parameters: parameters)
         
-        if tier == "0" || tier.lowercased() == "free" {
-            print("ℹ️ Setting app to Free (Tier 0).")
-        } else {
-            print("⚠️ Paid tiers implementation is complex and requires specific Price Point IDs. Defaulting to Free.")
+        do {
+            let response = try await provider.request(endpoint)
+            
+            // Find the active price. Usually the one with the latest start date that is <= now.
+            // For now, let's just get the first manual price and fetch its price point.
+//			print("Manual Prices", manualPrices)
+			
+			var pricePointId: String?
+			var territoryId: String?
+			
+//			for item in response.included! {
+//				if case .territory(let territory) = item {
+//					print(territory)
+//					territoryId = territory.id
+//				}
+//            }
+//			print(response.data.relationships ?? "No relationships")
+			print(response.data.relationships?.manualPrices?.data)
+			pricePointId = response.data.relationships?.manualPrices?.data?.first?.id
+			territoryId = response.data.relationships?.baseTerritory?.data?.id
+			
+			if let pricePointId, let territoryId {
+				print("Current price point id \(pricePointId) territory id \(territoryId)")
+				
+				// Fetch the price point to get the customer price
+				let ppEndpoint = APIEndpoint.v1.apps.id(appId).appPricePoints.get(parameters: .init(filterTerritory: [territoryId], limit: 200))
+				let ppResponse = try await provider.request(ppEndpoint)
+//				print(ppResponse.data.map { $0.id }.joined(separator: "\n"))
+				if let priceStr = ppResponse.data.first(where: { $0.id == pricePointId })?.attributes?.customerPrice {
+					return priceStr == "0.0" ? "Free" : "$\(priceStr)"
+				}
+			}
+            return nil
+        } catch {
+            return nil
         }
+    }
+
+    func fetchCurrentPriceSchedule(appId: String) async throws -> Set<String> {
+        var parameters = APIEndpoint.V1.Apps.WithID.AppPriceSchedule.GetParameters()
+        parameters.include = [.manualPrices]
+        parameters.limitManualPrices = 100
+        let endpoint = APIEndpoint.v1.apps.id(appId).appPriceSchedule.get(parameters: parameters)
+        
+        do {
+            let response = try await provider.request(endpoint)
+            let ids = response.data.relationships?.manualPrices?.data?.compactMap { $0.id } ?? []
+            return Set(ids)
+        } catch {
+            return []
+        }
+    }
+
+    func fetchAppPricePoints(appId: String) async throws -> [String] {
+        let endpoint = APIEndpoint.v1.apps.id(appId).appPricePoints.get(parameters: .init(limit: 200))
+        let response = try await provider.request(endpoint)
+        return response.data.compactMap { $0.attributes?.customerPrice }.sorted { (Double($0) ?? 0) < (Double($1) ?? 0) }
+    }
+
+    func updateAppPrice(appId: String, tier: String) async throws {
+		let territory = "CAN"
+        let targetPrice = (tier == "0" || tier.lowercased() == "free") ? "0.0" : tier
+        print("🔍 Searching for app-specific price point for price: \(targetPrice)...")
+        
+        // 1. Fetch app-specific price points
+		let endpoint = APIEndpoint.v1.apps.id(appId).appPricePoints.get(parameters: .init(filterTerritory: [territory], limit: 200))
+        let response = try await provider.request(endpoint)
+        
+        guard let pricePoint = response.data.first(where: { 
+            if let cp = $0.attributes?.customerPrice {
+                return Double(cp) == Double(targetPrice)
+            }
+            return false
+        }) else {
+            let available = response.data.compactMap { $0.attributes?.customerPrice }.prefix(10).joined(separator: ", ")
+            throw AppStoreConnectError.apiError("Price point for '\(targetPrice)' not found for this app. Available examples: \(available)")
+        }
+        
+        print("✅ Found price point: \(pricePoint) for \(pricePoint.attributes?.customerPrice ?? "unknown")")
+		
+        // 3. Create Price Schedule
+		let manualPriceId = "\(territory)-\(Int.random(in: 1...1000000))"
+		/// The two IDs above, maybe needs to be created in the DB before being used here? These are not the right IDs
+        let appRelationship = AppPriceScheduleCreateRequest.Data.Relationships.App(
+            data: .init(type: .apps, id: appId)
+        )
+        let territoryRelationship = AppPriceScheduleCreateRequest.Data.Relationships.BaseTerritory(
+            data: .init(type: .territories, id: territory)
+        )
+        let manualPricesRelationship = AppPriceScheduleCreateRequest.Data.Relationships.ManualPrices(
+            data: [.init(type: .appPrices, id: manualPriceId)]
+        )
+        
+        let relationships = AppPriceScheduleCreateRequest.Data.Relationships(
+            app: appRelationship,
+            baseTerritory: territoryRelationship,
+            manualPrices: manualPricesRelationship
+        )
+        
+//		let appPrice = AppPriceV2InlineCreate(type: .appPrices, id: manualPriceId)
+		let appTerritory = TerritoryInlineCreate(type: .territories, id: "\(territory)-\(Int.random(in: 1...10000))")
+//		let appPrice = AppPriceV2(type: .appPrices, id: manualPriceId, relationships: .init(appPricePoint: .init(data: .init(type: .appPricePoints, id: pricePoint.id)), territory: .init(data: .init(type: .territories, id: territory))))
+        
+        let createRequest = AppPriceScheduleCreateRequest(
+            data: .init(type: .appPriceSchedules, relationships: relationships),
+			included: [.territoryInlineCreate(appTerritory)]
+        )
+        
+        print("🚀 Updating app price to \(targetPrice)...")
+        let createEndpoint = APIEndpoint.v1.appPriceSchedules.post(createRequest)
+        _ = try await provider.request(createEndpoint)
+        
+        print("✅ Pricing updated.")
     }
 
     func uploadScreenshots(versionId: String, processedDirectory: URL) async throws {

@@ -9,6 +9,7 @@ struct Info: AsyncParsableCommand {
             ContentRights.self,
             AgeRatings.self,
             Privacy.self,
+            DataCollection.self,
             Pricing.self
         ]
     )
