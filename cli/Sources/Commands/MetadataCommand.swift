@@ -21,32 +21,20 @@ struct Metadata: AsyncParsableCommand {
 
         let service = try AppStoreConnectService(issuerId: issuerId, keyId: keyId, privateKey: privateKey)
         let aiService = AIService()
+        let projectService = ProjectService.shared
 
         // 2. Load context from appstro.json if it exists
         var contextName: String?
         var contextPitch: String?
         var contextAppPath: String?
         
-        let fileManager = FileManager.default
-        var currentDir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
-        var configURL: URL?
+        let projectRoot: URL? = projectService.findProjectRoot()
 
-        // Look for appstro.json in current or parent directories
-        for _ in 0...3 {
-            let checkURL = currentDir.appendingPathComponent("appstro.json")
-            if fileManager.fileExists(atPath: checkURL.path) {
-                configURL = checkURL
-                break
-            }
-            currentDir = currentDir.deletingLastPathComponent()
-        }
-
-        if let configURL = configURL,
-           let data = try? Data(contentsOf: configURL),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
-            contextName = json["name"]
-            contextPitch = json["description"]
-            contextAppPath = json["app_path"]
+        if let root = projectRoot,
+           let config = try? projectService.loadConfig(at: root) {
+            contextName = config.name
+            contextPitch = config.description
+            contextAppPath = config.appPath
             print("📖 Loaded context from appstro.json")
         }
 
@@ -58,11 +46,12 @@ struct Metadata: AsyncParsableCommand {
 
         print("📄 Reading project context...")
         // Use directory where appstro.json was found + app_path, or current dir
-        let baseDir = configURL?.deletingLastPathComponent() ?? URL(fileURLWithPath: fileManager.currentDirectoryPath)
+        let baseDir = projectRoot ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let rootDir = contextAppPath.map { baseDir.appendingPathComponent($0) } ?? baseDir
         let sourcesDir = rootDir.appendingPathComponent("Sources")
         
         var codeContext = ""
+        let fileManager = FileManager.default
         if let files = try? fileManager.contentsOfDirectory(at: sourcesDir, includingPropertiesForKeys: nil) {
             for file in files where file.pathExtension == "swift" {
                 if let content = try? String(contentsOf: file, encoding: .utf8) {

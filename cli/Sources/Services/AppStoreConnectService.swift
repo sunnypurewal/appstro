@@ -1,5 +1,5 @@
 import Foundation
-import AppStoreConnect_Swift_SDK
+@preconcurrency import AppStoreConnect_Swift_SDK
 import CryptoKit
 import ImageIO
 
@@ -26,6 +26,7 @@ struct AppInfo: Sendable {
 struct DraftVersion: Sendable {
     let version: String
     let id: String
+    let state: AppStoreVersionState
 }
 
 struct ContactInfo: Sendable {
@@ -151,28 +152,36 @@ final class AppStoreConnectService {
         }
     }
 
+    func findDraftVersion(for appId: String) async throws -> DraftVersion? {
+        var parameters = APIEndpoint.V1.Apps.WithID.AppStoreVersions.GetParameters()
+        parameters.limit = 5
+        let endpoint = APIEndpoint.v1.apps.id(appId).appStoreVersions.get(parameters: parameters)
+        let response = try await provider.request(endpoint)
+        
+        // Return the first version that isn't 'READY_FOR_SALE' or 'REPLACED_WITH_NEW_VERSION'
+        // as a candidate for "draft" or "in-progress" submission.
+        if let draft = response.data.first(where: { 
+            guard let state = $0.attributes?.appStoreState else { return false }
+            return state != .readyForSale && state != .replacedWithNewVersion 
+        }), let attributes = draft.attributes {
+            return DraftVersion(
+                version: attributes.versionString ?? "1.0", 
+                id: draft.id,
+                state: attributes.appStoreState ?? .prepareForSubmission
+            )
+        }
+        return nil
+    }
+
     func findLatestDraftVersion() async throws -> (app: AppInfo, version: String, id: String)? {
         let apps = try await listApps()
         
         for app in apps {
-            if let draft = try await findDraftVersion(for: app.id) {
+            if let draft = try await findDraftVersion(for: app.id), draft.state == .prepareForSubmission {
                 return (app, draft.version, draft.id)
             }
         }
         
-        return nil
-    }
-
-    func findDraftVersion(for appId: String) async throws -> DraftVersion? {
-        var parameters = APIEndpoint.V1.Apps.WithID.AppStoreVersions.GetParameters()
-        parameters.filterAppStoreState = [.prepareForSubmission]
-        parameters.limit = 1
-        let endpoint = APIEndpoint.v1.apps.id(appId).appStoreVersions.get(parameters: parameters)
-        let response = try await provider.request(endpoint)
-        
-        if let draft = response.data.first, let attributes = draft.attributes {
-            return DraftVersion(version: attributes.versionString ?? "1.0", id: draft.id)
-        }
         return nil
     }
 
@@ -376,6 +385,52 @@ final class AppStoreConnectService {
         _ = try await provider.request(APIEndpoint.v1.ageRatingDeclarations.id(id).patch(updateRequest))
     }
 
+    func fetchBuilds(appId: String, version: String? = nil) async throws -> [AppStoreConnect_Swift_SDK.Build] {
+        var parameters = APIEndpoint.V1.Builds.GetParameters()
+        parameters.filterApp = [appId]
+        if let version = version {
+            parameters.filterVersion = [version]
+        }
+        parameters.limit = 10
+        
+        let endpoint = APIEndpoint.v1.builds.get(parameters: parameters)
+        let response = try await provider.request(endpoint)
+        return response.data
+    }
+
+    func attachBuildToVersion(versionId: String, buildId: String) async throws {
+        let relationshipData = AppStoreVersionBuildLinkageRequest.Data(type: .builds, id: buildId)
+        let request = AppStoreVersionBuildLinkageRequest(data: relationshipData)
+        let endpoint = APIEndpoint.v1.appStoreVersions.id(versionId).relationships.build.patch(request)
+        _ = try await provider.request(endpoint)
+    }
+
+    func submitForReview(appId: String, versionId: String) async throws {
+        // 1. Create a Review Submission
+        let appRel = ReviewSubmissionCreateRequest.Data.Relationships.App(data: .init(type: .apps, id: appId))
+        let relationships = ReviewSubmissionCreateRequest.Data.Relationships(app: appRel)
+        
+        let submissionAttributes = ReviewSubmissionCreateRequest.Data.Attributes(platform: .ios)
+        let submissionCreateRequest = ReviewSubmissionCreateRequest(data: .init(type: .reviewSubmissions, attributes: submissionAttributes, relationships: relationships))
+        let submissionEndpoint = APIEndpoint.v1.reviewSubmissions.post(submissionCreateRequest)
+        let submission = try await provider.request(submissionEndpoint)
+        
+        // 2. Add the App Store Version to the Review Submission
+        let itemAttributes = ReviewSubmissionItemCreateRequest.Data.Relationships(
+            reviewSubmission: .init(data: .init(type: .reviewSubmissions, id: submission.data.id)),
+            appStoreVersion: .init(data: .init(type: .appStoreVersions, id: versionId))
+        )
+        let itemCreateRequest = ReviewSubmissionItemCreateRequest(data: .init(type: .reviewSubmissionItems, relationships: itemAttributes))
+        let itemEndpoint = APIEndpoint.v1.reviewSubmissionItems.post(itemCreateRequest)
+        _ = try await provider.request(itemEndpoint)
+        
+        // 3. Submit the Review Submission
+        let updateAttributes = ReviewSubmissionUpdateRequest.Data.Attributes(isSubmitted: true)
+        let updateRequest = ReviewSubmissionUpdateRequest(data: .init(type: .reviewSubmissions, id: submission.data.id, attributes: updateAttributes))
+        let updateEndpoint = APIEndpoint.v1.reviewSubmissions.id(submission.data.id).patch(updateRequest)
+        _ = try await provider.request(updateEndpoint)
+    }
+
     func updatePrivacyPolicy(appId: String, url: URL) async throws {
         // App Store Connect uses AppInfos for privacy policy URLs
         let appInfosEndpoint = APIEndpoint.v1.apps.id(appId).appInfos.get()
@@ -407,19 +462,10 @@ final class AppStoreConnectService {
             
             // Find the active price. Usually the one with the latest start date that is <= now.
             // For now, let's just get the first manual price and fetch its price point.
-//			print("Manual Prices", manualPrices)
 			
 			var pricePointId: String?
 			var territoryId: String?
 			
-//			for item in response.included! {
-//				if case .territory(let territory) = item {
-//					print(territory)
-//					territoryId = territory.id
-//				}
-//            }
-//			print(response.data.relationships ?? "No relationships")
-			print(response.data.relationships?.manualPrices?.data)
 			pricePointId = response.data.relationships?.manualPrices?.data?.first?.id
 			territoryId = response.data.relationships?.baseTerritory?.data?.id
 			
@@ -429,7 +475,6 @@ final class AppStoreConnectService {
 				// Fetch the price point to get the customer price
 				let ppEndpoint = APIEndpoint.v1.apps.id(appId).appPricePoints.get(parameters: .init(filterTerritory: [territoryId], limit: 200))
 				let ppResponse = try await provider.request(ppEndpoint)
-//				print(ppResponse.data.map { $0.id }.joined(separator: "\n"))
 				if let priceStr = ppResponse.data.first(where: { $0.id == pricePointId })?.attributes?.customerPrice {
 					return priceStr == "0.0" ? "Free" : "$\(priceStr)"
 				}
@@ -716,6 +761,61 @@ final class AppStoreConnectService {
         if !isProcessed {
             throw AppStoreConnectError.apiError("Timeout waiting for \(fileName) to process at Apple.")
         }
+    }
+
+    func findDistributionCertificateId() async throws -> String {
+		let endpoint = APIEndpoint.v1.certificates.get(parameters: .init(filterCertificateType: [], limit: 10))
+        let response = try await provider.request(endpoint)
+		
+		print(response.data.map { $0.attributes?.certificateType })
+		throw AppStoreConnectError.apiError("Certificate fetching not implemented correctly yet.")
+        
+        guard let cert = response.data.first else {
+            throw AppStoreConnectError.apiError("No iOS Distribution certificate found. Please create one in App Store Connect.")
+        }
+        
+        return cert.id
+    }
+
+    func findBundleIdRecordId(identifier: String) async throws -> String {
+        let endpoint = APIEndpoint.v1.bundleIDs.get(parameters: .init(filterIdentifier: [identifier]))
+        let response = try await provider.request(endpoint)
+        
+        guard let record = response.data.first else {
+            throw AppStoreConnectError.apiError("Bundle ID '\(identifier)' not found on App Store Connect.")
+        }
+        
+        return record.id
+    }
+
+    func createProvisioningProfile(name: String, bundleIdRecordId: String, certificateId: String) async throws -> Data {
+        let attributes = ProfileCreateRequest.Data.Attributes(
+            name: name,
+            profileType: .iosAppStore
+        )
+        
+        let bundleIdRel = ProfileCreateRequest.Data.Relationships.BundleID(
+            data: .init(type: .bundleIDs, id: bundleIdRecordId)
+        )
+        let certRel = ProfileCreateRequest.Data.Relationships.Certificates(
+            data: [.init(type: .certificates, id: certificateId)]
+        )
+        
+        let relationships = ProfileCreateRequest.Data.Relationships(
+            bundleID: bundleIdRel,
+            certificates: certRel
+        )
+        
+        let createRequest = ProfileCreateRequest(data: .init(type: .profiles, attributes: attributes, relationships: relationships))
+        let endpoint = APIEndpoint.v1.profiles.post(createRequest)
+        let response = try await provider.request(endpoint)
+        
+        guard let contentBase64 = response.data.attributes?.profileContent,
+              let data = Data(base64Encoded: contentBase64) else {
+            throw AppStoreConnectError.apiError("Failed to download provisioning profile content.")
+        }
+        
+        return data
     }
 
     private func findMostFrequentPrefix(identifiers: [String]) -> String? {
