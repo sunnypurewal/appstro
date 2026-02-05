@@ -1,0 +1,15 @@
+# SwiftLint configuration
+included:
+  - cli
+  - Packages
+
+disabled_rules:
+  - trailing_whitespace # Can be annoying during development
+  - line_length # Standard limit is often too short for SwiftUI
+
+indentation:
+  style: tabs
+  indent_width: 1
+
+opt_in_rules:
+  - indentation
