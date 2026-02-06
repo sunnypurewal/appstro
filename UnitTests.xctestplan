@@ -1,0 +1,52 @@
+{
+  "configurations" : [
+    {
+      "id" : "45440FEB-DECE-49D3-90B2-1097FB97E685",
+      "name" : "Configuration 1",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "testTimeoutsEnabled" : true
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:",
+        "identifier" : "appstroTests",
+        "name" : "appstroTests"
+      }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:",
+        "identifier" : "AppstroCoreTests",
+        "name" : "AppstroCoreTests"
+      }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:",
+        "identifier" : "AppstroAITests",
+        "name" : "AppstroAITests"
+      }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:",
+        "identifier" : "AppstroASCTests",
+        "name" : "AppstroASCTests"
+      }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:",
+        "identifier" : "AppstroServicesTests",
+        "name" : "AppstroServicesTests"
+      }
+    }
+  ],
+  "version" : 1
+}

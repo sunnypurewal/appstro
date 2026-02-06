@@ -1,3 +1,5 @@
+.swiftpm/
+xcuserdata/
 *.log
 .app
 .build

@@ -1,7 +1,7 @@
 OUTPUT_DIR ?= .build
 
 cli:
-	$(MAKE) -C cli build OUTPUT_DIR=$(abspath $(OUTPUT_DIR))
+	swift build -c release --product appstro
 
 lint:
 	swiftlint lint --config .swiftlint.yml
