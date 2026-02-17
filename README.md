@@ -32,6 +32,15 @@ You will need to set the following environment variables in your shell profile (
 - `APPSTORE_KEY_ID`
 - `APPSTORE_PRIVATE_KEY`
 
+### AI Configuration
+Several features in `appstro`, such as automated metadata generation and screenshot analysis, use AI. To enable these features, you must provide an API key for one of the supported providers:
+
+- **Google Gemini:** `GEMINI_API_KEY` (or `GOOGLE_GENERATIVE_AI_API_KEY`)
+- **Anthropic Claude:** `ANTHROPIC_API_KEY`
+- **OpenAI GPT:** `OPENAI_API_KEY`
+
+The tool will automatically detect and use the first available key from the above list.
+
 ## Commands
 
 ### Main Commands
