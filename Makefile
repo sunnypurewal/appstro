@@ -16,4 +16,7 @@ lint:
 format:
 	swiftlint --fix --config .swiftlint.yml
 
-.PHONY: cli release clean lint format
+install: release
+	cp .build/release/appstro /usr/local/bin/appstro
+
+.PHONY: cli release clean lint format install
