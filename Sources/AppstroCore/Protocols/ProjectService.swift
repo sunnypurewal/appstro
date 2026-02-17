@@ -10,5 +10,6 @@ public protocol ProjectService: Sendable {
 	func ensureAppstroDirectory(at root: URL) async throws -> URL
 	func ensureReleaseDirectory(at root: URL, version: String) async throws -> URL
 	func setupGitIgnore(at root: URL) async throws
+	func initializeGit(at root: URL) async throws
 	func build(at root: URL, config: AppstroConfig, version: String, buildNumber: String) async throws -> URL
 }

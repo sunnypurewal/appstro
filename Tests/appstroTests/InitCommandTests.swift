@@ -28,6 +28,11 @@ final class InitCommandTests: XCTestCase {
     }
     
     func testInitNewProject() async throws {
+        var gitInitialized = false
+        mockProject.initializeGitHandler = { _ in
+            gitInitialized = true
+        }
+
         mockUI.promptHandler = { text, defaultValue in
             if text == "app name" { return "TestApp" }
             if text == "Is this OK?" { return "yes" }
@@ -43,6 +48,7 @@ final class InitCommandTests: XCTestCase {
         
         XCTAssertTrue((tempDir + "appstro.json").exists)
         XCTAssertTrue((tempDir + "Sources/App.swift").exists)
+        XCTAssertTrue(gitInitialized)
     }
 
     func testInitExistingProject() async throws {

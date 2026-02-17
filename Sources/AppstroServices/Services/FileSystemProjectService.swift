@@ -239,6 +239,17 @@ public final class FileSystemProjectService: ProjectService {
 		}
 	}
 
+	public func initializeGit(at root: URL) async throws {
+		let gitURL = root.appendingPathComponent(".git")
+		if !FileManager.default.fileExists(atPath: gitURL.path) {
+			let process = Process()
+			process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+			process.currentDirectoryURL = root
+			process.arguments = ["init"]
+			try await runProcess(process)
+		}
+	}
+
 	public func build(at root: URL, config: AppstroConfig, version: String, buildNumber: String) async throws -> URL {
 		let appPath = config.appPath ?? "."
 		let projectURL = root.appendingPathComponent(appPath)

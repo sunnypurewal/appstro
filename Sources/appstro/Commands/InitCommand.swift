@@ -26,6 +26,7 @@ struct Init: AsyncParsableCommand {
 		let projectURL = URL(fileURLWithPath: projectPath.string, isDirectory: true)
 		let existingProjectName = Environment.live.project.containsXcodeProject(at: projectURL)
 		let existingBundleIdentifier = Environment.live.project.getBundleIdentifier(at: projectURL)
+		let existingTeamID = Environment.live.project.getTeamID(at: projectURL)
 
 		if (projectPath + "appstro.json").exists {
 			let overwrite = UI.prompt("appstro.json already exists. Overwrite?", defaultValue: "no")
@@ -51,7 +52,6 @@ struct Init: AsyncParsableCommand {
 		let keywords = keywordsString.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
 		
 		let bundleIdentifier = existingBundleIdentifier
-		let teamID = UI.prompt("team id (optional, for code signing)")
 
 		let config = AppstroConfig(
 			name: projectName,
@@ -59,7 +59,7 @@ struct Init: AsyncParsableCommand {
 			keywords: keywords,
 			bundleIdentifier: bundleIdentifier,
 			appPath: ".",
-			teamID: teamID.isEmpty ? nil : teamID
+			teamID: existingTeamID
 		)
 
 		let encoder = JSONEncoder()
@@ -83,7 +83,8 @@ struct Init: AsyncParsableCommand {
 			// 1. Write appstro.json
 			try (projectPath + "appstro.json").write(configData)
 
-			// 2. Setup .gitignore
+			// 2. Setup git
+			try await Environment.live.project.initializeGit(at: projectURL)
 			try await Environment.live.project.setupGitIgnore(at: projectURL)
 
 			if existingProjectName == nil {

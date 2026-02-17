@@ -114,12 +114,29 @@ final class MockProjectService: ProjectService, @unchecked Sendable {
         try await ensureReleaseDirectoryHandler?(root, version) ?? root
     }
     
-    var setupGitIgnoreHandler: ((URL) async throws -> Void)?
-    func setupGitIgnore(at root: URL) async throws {
-        try await setupGitIgnoreHandler?(root)
-    }
+    	var setupGitIgnoreHandler: ((URL) async throws -> Void)?
     
-    var buildHandler: ((URL, AppstroConfig, String, String) async throws -> URL)?
+    	func setupGitIgnore(at root: URL) async throws {
+    
+    		try await setupGitIgnoreHandler?(root)
+    
+    	}
+    
+    
+    
+    	var initializeGitHandler: ((URL) async throws -> Void)?
+    
+    	func initializeGit(at root: URL) async throws {
+    
+    		try await initializeGitHandler?(root)
+    
+    	}
+    
+    
+    
+    	var buildHandler: ((URL, AppstroConfig, String, String) async throws -> URL)?
+    
+    
     func build(at root: URL, config: AppstroConfig, version: String, buildNumber: String) async throws -> URL {
         try await buildHandler?(root, config, version, buildNumber) ?? root
     }
